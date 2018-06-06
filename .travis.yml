@@ -11,13 +11,13 @@ env:
 install:
   - pip install -r requirements.txt
   - pip install -r requirements-dev.txt
-  - if [ "$TRAVIS_PYTHON_VERSION" == "2.6" ]; then pip install -r requirements-2.6.txt; fi
   - if [ "$LXML" == "true" ]; then pip install lxml; fi
 script:
   - python -m pytest
-  - pep8 owslib/wmts.py
+  - flake8 owslib/wmts.py
+  - flake8 owslib/wps.py
 after_success:
-  - coveralls  
+  - coveralls
 notifications:
   irc:
     - "irc.freenode.org#geopython"

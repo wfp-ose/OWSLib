@@ -9,12 +9,16 @@
 from __future__ import (absolute_import, division, print_function)
 
 #owslib imports:
+from owslib import util
+from owslib.fgdc import Metadata
+from owslib.iso import MD_Metadata
 from owslib.ows import ServiceIdentification, ServiceProvider, OperationsMetadata
 from owslib.etree import etree
 from owslib.util import nspath, testXMLValue, openURL
 from owslib.crs import Crs
 from owslib.feature import WebFeatureService_
-from owslib.feature.common import WFSCapabilitiesReader
+from owslib.feature.common import WFSCapabilitiesReader, \
+    AbstractContentMetadata
 from owslib.namespaces import Namespaces
 
 #other imports
@@ -98,21 +102,23 @@ class WebFeatureService_2_0_0(WebFeatureService_):
 
         #serviceIdentification metadata
         serviceidentelem=self._capabilities.find(nspath('ServiceIdentification'))
-        self.identification=ServiceIdentification(serviceidentelem)
+        if serviceidentelem is not None:
+            self.identification=ServiceIdentification(serviceidentelem)
         #need to add to keywords list from featuretypelist information:
         featuretypelistelem=self._capabilities.find(nspath('FeatureTypeList', ns=WFS_NAMESPACE))
         featuretypeelems=featuretypelistelem.findall(nspath('FeatureType', ns=WFS_NAMESPACE))
-        for f in featuretypeelems:
-            kwds=f.findall(nspath('Keywords/Keyword',ns=OWS_NAMESPACE))
-            if kwds is not None:
-                for kwd in kwds[:]:
-                    if kwd.text not in self.identification.keywords:
-                        self.identification.keywords.append(kwd.text)
-
+        if serviceidentelem is not None:
+            for f in featuretypeelems:
+                kwds=f.findall(nspath('Keywords/Keyword',ns=OWS_NAMESPACE))
+                if kwds is not None:
+                    for kwd in kwds[:]:
+                        if kwd.text not in self.identification.keywords:
+                            self.identification.keywords.append(kwd.text)
 
         #TODO: update serviceProvider metadata, miss it out for now
         serviceproviderelem=self._capabilities.find(nspath('ServiceProvider'))
-        self.provider=ServiceProvider(serviceproviderelem)
+        if serviceproviderelem:
+            self.provider=ServiceProvider(serviceproviderelem)
 
         #serviceOperations metadata
         self.operations=[]
@@ -160,7 +166,7 @@ class WebFeatureService_2_0_0(WebFeatureService_):
         """
         Helper method to make sure the StringIO being returned will work.
 
-        Differences between Python 2.6/2.7/3.x mean we have a lot of cases to handle.
+        Differences between Python 2.7/3.x mean we have a lot of cases to handle.
         """
         if PY2:
             return StringIO(strval)
@@ -169,7 +175,7 @@ class WebFeatureService_2_0_0(WebFeatureService_):
 
     def getfeature(self, typename=None, filter=None, bbox=None, featureid=None,
                    featureversion=None, propertyname=None, maxfeatures=None,storedQueryID=None, storedQueryParams=None,
-                   method='Get', outputFormat=None, startindex=None):
+                   method='Get', outputFormat=None, startindex=None, sortby=None):
         """Request and return feature data as a file-like object.
         #TODO: NOTE: have changed property name from ['*'] to None - check the use of this in WFS 2.0
         Parameters
@@ -194,6 +200,10 @@ class WebFeatureService_2_0_0(WebFeatureService_):
             Requested response format of the request.
         startindex: int (optional)
             Start position to return feature set (paging in combination with maxfeatures)
+        sortby: list (optional)
+            List of property names whose values should be used to order
+            (upon presentation) the set of feature instances that
+            satify the query.
 
         There are 3 different modes of use
 
@@ -209,7 +219,8 @@ class WebFeatureService_2_0_0(WebFeatureService_):
             (url) = self.getGETGetFeatureRequest(typename, filter, bbox, featureid,
                                                  featureversion, propertyname,
                                                  maxfeatures, storedQueryID,
-                                                 storedQueryParams, outputFormat, 'Get', startindex)
+                                                 storedQueryParams, outputFormat, 'Get',
+                                                 startindex, sortby)
             if log.isEnabledFor(logging.DEBUG):
                 log.debug('GetFeature WFS GET url %s'% url)
         else:
@@ -356,7 +367,7 @@ class Parameter(object):
         self.type=type
 
 
-class ContentMetadata:
+class ContentMetadata(AbstractContentMetadata):
     """Abstraction for WFS metadata.
 
     Implements IMetadata.
@@ -414,22 +425,32 @@ class ContentMetadata:
 
         # MetadataURLs
         self.metadataUrls = []
-        for m in elem.findall('MetadataURL'):
+        for m in elem.findall(nspath('MetadataURL', ns=WFS_NAMESPACE)):
             metadataUrl = {
-                'type': testXMLValue(m.attrib['type'], attrib=True),
-                'format': m.find('Format').text.strip(),
-                'url': testXMLValue(m.find('OnlineResource').attrib['{http://www.w3.org/1999/xlink}href'], attrib=True)
+                'url': testXMLValue(m.attrib['{http://www.w3.org/1999/xlink}href'], attrib=True)
             }
+            self.metadataUrls.append(metadataUrl)
 
-            if metadataUrl['url'] is not None and parse_remote_metadata:  # download URL
+        if parse_remote_metadata:
+            self.parse_remote_metadata(timeout)
+
+    def parse_remote_metadata(self, timeout=30):
+        """Parse remote metadata for MetadataURL and add it as metadataUrl['metadata']"""
+        for metadataUrl in self.metadataUrls:
+            if metadataUrl['url'] is not None:
                 try:
                     content = openURL(metadataUrl['url'], timeout=timeout)
-                    doc = etree.parse(content)
-                    try:  # FGDC
-                        metadataUrl['metadata'] = Metadata(doc)
-                    except:  # ISO
-                        metadataUrl['metadata'] = MD_Metadata(doc)
-                except Exception:
-                    metadataUrl['metadata'] = None
+                    doc = etree.fromstring(content.read())
 
-            self.metadataUrls.append(metadataUrl)
+                    mdelem = doc.find('.//metadata')
+                    if mdelem is not None:
+                        metadataUrl['metadata'] = Metadata(mdelem)
+                        continue
+
+                    mdelem = doc.find('.//' + util.nspath_eval('gmd:MD_Metadata', n.get_namespaces(['gmd']))) \
+                             or doc.find('.//' + util.nspath_eval('gmi:MI_Metadata', n.get_namespaces(['gmi'])))
+                    if mdelem is not None:
+                        metadataUrl['metadata'] = MD_Metadata(mdelem)
+                        continue
+                except:
+                    metadataUrl['metadata'] = None

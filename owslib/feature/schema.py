@@ -26,7 +26,7 @@ GML_NAMESPACES = (MYNS.get_namespace('gml'),
                   MYNS.get_namespace('gml32'))
 
 
-def get_schema(url, typename, version='1.0.0', timeout=30):
+def get_schema(url, typename, version='1.0.0', timeout=30, username=None, password=None):
     """Parses DescribeFeatureType response and creates schema compatible
     with :class:`fiona`
 
@@ -37,8 +37,11 @@ def get_schema(url, typename, version='1.0.0', timeout=30):
     """
 
     url = _get_describefeaturetype_url(url, version, typename)
-    res = openURL(url, timeout=timeout)
+    res = openURL(url, timeout=timeout, username=username, password=password)
     root = etree.fromstring(res.read())
+
+    if ':' in typename:
+        typename = typename.split(':')[1]
     type_element = findall(root, '{%s}element' % XS_NAMESPACE,
                            attribute_name='name', attribute_value=typename)[0]
     complex_type = type_element.attrib['type'].split(":")[1]
@@ -89,28 +92,26 @@ def _construct_schema(elements, nsmap):
         gml_key = 'gml'
         schema_key = 'xsd'
 
+    mappings = {
+        'PointPropertyType': 'Point',
+        'PolygonPropertyType': 'Polygon',
+        'LineStringPropertyType': 'LineString',
+        'MultiPointPropertyType': 'MultiPoint',
+        'MultiLineStringPropertyType': 'MultiLineString',
+        'MultiPolygonPropertyType': 'MultiPolygon',
+        'MultiGeometryPropertyType': 'MultiGeometry',
+        'GeometryPropertyType': 'GeometryCollection',
+        'SurfacePropertyType': '3D Polygon',
+        'MultiSurfacePropertyType': '3D MultiPolygon'
+    }
+
     for element in elements:
         data_type = element.attrib['type'].replace(gml_key + ':', '')
         name = element.attrib['name']
 
-        if data_type == 'PointPropertyType':
-            schema['geometry'] = 'Point'
-        elif data_type == 'PolygonPropertyType':
-            schema['geometry'] = 'Polygon'
-        elif data_type == 'LineStringPropertyType':
-            schema['geometry'] = 'LineString'
-        elif data_type == 'MultiPointPropertyType':
-            schema['geometry'] = 'MultiPoint'
-        elif data_type == 'MultiLineStringPropertyType':
-            schema['geometry'] = 'MultiLineString'
-        elif data_type == 'MultiPolygonPropertyType':
-            schema['geometry'] = 'MultiPolygon'
-        elif data_type == 'MultiGeometryPropertyType':
-            schema['geometry'] = 'MultiGeometry'
-        elif data_type == 'GeometryPropertyType':
-            schema['geometry'] = 'GeometryCollection'
-        elif data_type == 'SurfacePropertyType':
-            schema['geometry'] = '3D Polygon'
+        if data_type in mappings:
+            schema['geometry'] = mappings[data_type]
+            schema['geometry_column'] = name
         else:
             schema['properties'][name] = data_type.replace(schema_key+':', '')
 
@@ -142,4 +143,3 @@ def _get_describefeaturetype_url(url, version, typename):
 
     urlqs = urlencode(tuple(query_string))
     return url.split('?')[0] + '?' + urlqs
-

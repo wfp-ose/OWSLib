@@ -10,8 +10,9 @@
 from __future__ import (absolute_import, division, print_function)
 
 import sys
+from collections import OrderedDict
 from dateutil import parser
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 from owslib.etree import etree, ParseError
 from owslib.namespaces import Namespaces
@@ -36,7 +37,7 @@ Utility functions and classes
 """
 
 class ServiceException(Exception):
-    #TODO: this should go in ows common module when refactored.  
+    #TODO: this should go in ows common module when refactored.
     pass
 
 # http://stackoverflow.com/questions/6256183/combine-two-dictionaries-of-dictionaries-python
@@ -90,7 +91,7 @@ def xml_to_dict(root, prefix=None, depth=1, diction=None):
         Return
         =======
         Dictionary of (key,value); where key is the element tag stripped of namespace and cleaned up to be pep8 and
-        value is the inner-text of the element. Note that duplicate elements will be replaced by the last element of the 
+        value is the inner-text of the element. Note that duplicate elements will be replaced by the last element of the
         same tag in the tree.
     """
     ret = diction if diction is not None else dict()
@@ -133,13 +134,21 @@ class ResponseWrapper(object):
 
     # @TODO: __getattribute__ for poking at response
 
-def openURL(url_base, data=None, method='Get', cookies=None, username=None, password=None, timeout=30, headers=None):
+def openURL(url_base, data=None, method='Get', cookies=None, username=None, password=None, timeout=30, headers=None,
+            verify=True, cert=None):
     """
     Function to open URLs.
 
     Uses requests library but with additional checks for OGC service exceptions and url formatting.
     Also handles cookies and simple user password authentication.
+
+    :param headers: (optional) Dictionary of HTTP Headers to send with the :class:`Request`.
+    :param verify: (optional) whether the SSL cert will be verified. A CA_BUNDLE path can also be provided.
+                   Defaults to ``True``.
+    :param cert: (optional) A file with a client side certificate for SSL authentication
+                 to send with the :class:`Request`.
     """
+
     headers = headers if headers is not None else {}
     rkwargs = {}
 
@@ -166,7 +175,7 @@ def openURL(url_base, data=None, method='Get', cookies=None, username=None, pass
 
     elif method.lower() == 'get':
         rkwargs['params'] = data
-        
+
     else:
         raise ValueError("Unknown method ('%s'), expected 'get' or 'post'" % method)
 
@@ -176,6 +185,8 @@ def openURL(url_base, data=None, method='Get', cookies=None, username=None, pass
     req = requests.request(method.upper(),
                            url_base,
                            headers=headers,
+                           verify=verify,
+                           cert=cert,
                            **rkwargs)
 
     if req.status_code in [400, 401]:
@@ -202,7 +213,7 @@ def openURL(url_base, data=None, method='Get', cookies=None, username=None, pass
             serviceException = se_tree.find(possible_error)
             if serviceException is not None:
                 # and we need to deal with some message nesting
-                raise ServiceException('\n'.join([str(t).strip() for t in serviceException.itertext() if str(t).strip()]))
+                raise ServiceException('\n'.join([encode_string(t).strip() for t in serviceException.itertext() if encode_string(t).strip()]))
 
     return ResponseWrapper(req)
 
@@ -213,7 +224,7 @@ def nspath(path, ns=OWS_NAMESPACE):
     """
 
     Prefix the given path with the given namespace identifier.
-    
+
     Parameters
     ----------
 
@@ -323,10 +334,10 @@ def testXMLValue(val, attrib=False):
     if val is not None:
         if attrib:
             return val.strip()
-        elif val.text:  
+        elif val.text:
             return val.text.strip()
         else:
-            return None	
+            return None
     else:
         return None
 
@@ -350,7 +361,7 @@ def testXMLAttribute(element, attribute):
 def http_post(url=None, request=None, lang='en-US', timeout=10, username=None, password=None):
     """
 
-    Invoke an HTTP POST request 
+    Invoke an HTTP POST request
 
     Parameters
     ----------
@@ -468,21 +479,42 @@ def getNamespace(element):
     else:
         return ""
 
-def build_get_url(base_url, params):
-    ''' Utility function to build a full HTTP GET URL from the service base URL and a dictionary of HTTP parameters. '''
-    
-    qs = []
+
+def build_get_url(base_url, params, overwrite=False):
+    ''' Utility function to build a full HTTP GET URL from the service base URL and a dictionary of HTTP parameters.
+
+    TODO: handle parameters case-insensitive?
+
+    @param overwrite: boolean flag to allow overwrite of parameters of the base_url (default: False)
+    '''
+
+    qs_base = []
     if base_url.find('?') != -1:
-        qs = cgi.parse_qsl(base_url.split('?')[1])
+        qs_base = cgi.parse_qsl(base_url.split('?')[1])
+
+    qs_params = []
+    for key, value in six.iteritems(params):
+        qs_params.append((key, value))
+
+    qs = qs_add = []
+    if overwrite is True:
+        # all params and additional base
+        qs = qs_params
+        qs_add = qs_base
+    else:
+        # all base and additional params
+        qs = qs_base
+        qs_add = qs_params
 
     pars = [x[0] for x in qs]
 
-    for key,value in six.iteritems(params):
+    for key, value in qs_add:
         if key not in pars:
-            qs.append( (key,value) )
+            qs.append((key, value))
 
     urlqs = urlencode(tuple(qs))
     return base_url.split('?')[0] + '?' + urlqs
+
 
 def dump(obj, prefix=''):
     '''Utility function to print to standard output a generic object with all its attributes.'''
@@ -493,7 +525,7 @@ def getTypedValue(data_type, value):
     '''Utility function to cast a string value to the appropriate XSD type. '''
 
     if data_type == 'boolean':
-        return bool(value)
+        return True if value.lower() == 'true' else False
     elif data_type == 'integer':
         return int(value)
     elif data_type == 'float':
@@ -537,35 +569,35 @@ def extract_xml_list(elements):
 Some people don't have seperate tags for their keywords and seperate them with
 a newline. This will extract out all of the keywords correctly.
 """
-    if elements:
-        keywords = [re.split(r'[\n\r]+',f.text) for f in elements if f.text]
-        flattened = [item.strip() for sublist in keywords for item in sublist]
-        remove_blank = [_f for _f in flattened if _f]
-        return remove_blank
-    else:
-        return []
+    keywords = (re.split(r'[\n\r]+',f.text) for f in elements if f.text)
+    flattened = (item.strip() for sublist in keywords for item in sublist)
+    remove_blank = [_f for _f in flattened if _f]
+    return remove_blank
 
 
 def strip_bom(raw_text):
     """ return the raw (assumed) xml response without the BOM
     """
     boms = [
+        # utf-8
+        codecs.BOM_UTF8,
+        # utf-16
         codecs.BOM,
         codecs.BOM_BE,
         codecs.BOM_LE,
-        codecs.BOM_UTF8,
         codecs.BOM_UTF16,
         codecs.BOM_UTF16_LE,
         codecs.BOM_UTF16_BE,
+        # utf-32
         codecs.BOM_UTF32,
         codecs.BOM_UTF32_LE,
         codecs.BOM_UTF32_BE
     ]
 
-    if not isinstance(raw_text, str):
+    if isinstance(raw_text, six.binary_type):
         for bom in boms:
             if raw_text.startswith(bom):
-                return raw_text.replace(bom, '')
+                return raw_text[len(bom):]
     return raw_text
 
 
@@ -634,13 +666,6 @@ except AttributeError:
 log = logging.getLogger('owslib')
 log.addHandler(NullHandler())
 
-# OrderedDict
-try:  # 2.7
-    from collections import OrderedDict
-except:  # 2.6
-    from ordereddict import OrderedDict
-
-
 def which_etree():
     """decipher which etree library is being used by OWSLib"""
 
@@ -668,24 +693,45 @@ def findall(root, xpath, attribute_name=None, attribute_value=None):
 
     found_elements = []
 
-
-    # python 2.6 < does not support complicated XPATH expressions used lower
-    if (2, 6) == sys.version_info[0:2] and which_etree() != 'lxml.etree':
-
-        elements = root.getiterator(xpath)
-
-        if attribute_name is not None and attribute_value is not None:
-            for element in elements:
-                if element.attrib.get(attribute_name) == attribute_value:
-                    found_elements.append(element)
-        else:
-            found_elements = elements
-    # python at least 2.7 and/or lxml can do things much simplier
-    else:
-        if attribute_name is not None and attribute_value is not None:
-            xpath = '%s[@%s="%s"]' % (xpath, attribute_name, attribute_value)
-        found_elements = root.findall('.//' + xpath)
+    if attribute_name is not None and attribute_value is not None:
+        xpath = '%s[@%s="%s"]' % (xpath, attribute_name, attribute_value)
+    found_elements = root.findall('.//' + xpath)
 
     if found_elements == []:
         found_elements = None
     return found_elements
+
+
+def datetime_from_iso(iso):
+    """returns a datetime object from dates in the format 2001-07-01T00:00:00Z or 2001-07-01T00:00:00.000Z """
+    try:
+        iso_datetime = datetime.strptime(iso, "%Y-%m-%dT%H:%M:%SZ")
+    except:
+        iso_datetime = datetime.strptime(iso, "%Y-%m-%dT%H:%M:%S.%fZ")
+    return iso_datetime
+
+def datetime_from_ansi(ansi):
+    """Converts an ansiDate (expressed as a number = the nuber of days since the datum origin of ansi) to a python datetime object."""
+
+    datumOrigin = datetime(1600,12,31,0,0,0)
+
+    return datumOrigin + timedelta(ansi)
+
+def is_vector_grid(grid_elem):
+    pass
+
+
+def encode_string(text):
+    """
+    On Python 3 this method does nothing and returns the ``text`` string itself.
+    On Python 2 this method returns the ``text`` string encoded with UTF-8.
+
+    See:
+    * https://pythonhosted.org/six/#six.python_2_unicode_compatible
+    * https://www.azavea.com/blog/2014/03/24/solving-unicode-problems-in-python-2-7/
+    """
+    if six.PY3:
+        return text
+    if isinstance(text, str):
+        return text.decode('utf-8').encode('utf-8', 'ignore')
+    return text.encode('utf-8', 'ignore')
